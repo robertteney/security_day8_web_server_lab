@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Sec+ Web Server Mitigation Simulator — Interactive Exercise</title>
+  <style>
+    :root{ --bg:#000; --fg:#0f0; --muted:#6f6 }
+    html,body{height:100%; margin:0}
+    body{
+      font-family: Consolas, monospace;
+      background: var(--bg);
+      color: var(--fg);
+      display:flex; flex-direction:column;
+    }
+    header{
+      background:#062; color:#001; padding:10px 14px; font-weight:bold; border-bottom:1px solid var(--fg);
+    }
+    #instructions{
+      padding:10px 14px; background:#111; border-bottom:1px solid var(--fg);
+    }
+    #terminal{
+      flex:1; padding:12px; overflow:auto; white-space:pre; line-height:1.4;
+    }
+    #command-row{ display:flex; border-top:1px solid var(--fg); }
+    #command{
+      flex:1; padding:10px; border: none; background: transparent; color:var(--fg); font-size:15px;
+    }
+    #command:focus{ outline: none; }
+    button#run, button#submit, button#reset{
+      background: var(--fg); color: #000; border:none; padding:10px 16px; cursor:pointer; font-weight:700; margin-left:2px;
+    }
+    footer{ font-size:12px; padding:8px 12px; color:#7f7; border-top:1px solid rgba(0,255,0,0.05) }
+  </style>
+</head>
+<body>
+  <header>CompTIA Sec+ — Interactive Web Server Mitigation Exercise</header>
+
+  <div id="instructions">
+    Review the server state carefully. Your task is to identify any potential problems and take appropriate actions to secure the server. Use only the allowed commands to check processes, open files, running services, and remove suspicious files or stop dangerous services.
+  </div>
+
+  <div id="terminal" role="log" aria-live="polite"></div>
+
+  <div id="command-row">
+    <input id="command" autocomplete="off" placeholder='Type "help" for commands — e.g. netstat -o, lsof, kill -9 1001, service nginx stop, rm /path/to/file' />
+    <button id="run">Run</button>
+    <button id="submit">Submit</button>
+    <button id="reset">Reset</button>
+  </div>
+
+  <footer>Simulation only — allowed commands: help, netstat -o, lsof/losf, kill -9 &lt;PID&gt;, service &lt;name&gt; start|stop, rm &lt;path&gt;</footer>
+
+<script>
+/* -----------------------
+   Simulated system state
+----------------------- */
+let initialState;
+let nextPid;
+let processes;
+let services;
+let files;
+
+function initializeState(){
+  nextPid = 1100;
+  processes = [
+    { pid: 1001, name: 'nginx', user: 'www-data', local: '0.0.0.0:80',  foreign: '203.0.113.5:52344', state: 'ESTABLISHED' },
+    { pid: 1002, name: 'nginx', user: 'www-data', local: '0.0.0.0:443', foreign: '198.51.100.12:49822', state: 'ESTABLISHED' },
+    { pid: 1003, name: 'ssh',   user: 'root',     local: '0.0.0.0:22',  foreign: '192.0.2.45:33410', state: 'ESTABLISHED' },
+    { pid: 1004, name: 'malproc', user: 'nobody', local: '0.0.0.0:8080', foreign: '198.51.100.12:41200', state: 'ESTABLISHED' }
+  ];
+
+  services = {
+    nginx: true,
+    apache2: false,
+    ssh: true,
+    httpd: false,
+    malproc: true
+  };
+
+  files = [
+    '/var/www/html/index.html',
+    '/var/www/html/malware.php',
+    '/tmp/session.tmp',
+    '/var/log/nginx/access.log'
+  ];
+
+  // deep clone for reset and submit
+  initialState = { processes: JSON.parse(JSON.stringify(processes)), services: JSON.parse(JSON.stringify(services)), files: JSON.parse(JSON.stringify(files)) };
+}
+
+initializeState();
+
+/* -----------------------
+   UI helpers
+----------------------- */
+const terminal = document.getElementById('terminal');
+const cmdInput = document.getElementById('command');
+const runBtn = document.getElementById('run');
+const submitBtn = document.getElementById('submit');
+const resetBtn = document.getElementById('reset');
+
+function write(line=''){ terminal.textContent += line + '\n'; terminal.scrollTop = terminal.scrollHeight; }
+function writeColored(line, cls){ const span=document.createElement('span'); if(cls) span.className=cls; span.textContent=line; terminal.appendChild(span); terminal.appendChild(document.createTextNode('\n')); terminal.scrollTop = terminal.scrollHeight; }
+write('Simulation started. Type "help" for available commands.');
+write('');
+
+/* -----------------------
+   Command implementations
+----------------------- */
+function showHelp(){
+  write('Available commands:');
+  write('  help');
+  write('  netstat -o');
+  write('  lsof / losf');
+  write('  kill -9 <PID>');
+  write('  service <name> start|stop');
+  write('  rm <path>');
+  write('');
+}
+
+function cmd_netstat_o(){ write('Proto\tLocal Address\tForeign Address\tPID/Program'); processes.forEach(p=>write(`tcp\t${p.local}\t${p.foreign}\t${p.pid}/${p.name}`)); write(''); }
+function cmd_lsof(){ write('COMMAND\tPID\tUSER\tFD\tTYPE\tNODE\tNAME'); processes.forEach(p=>write(`${p.name}\t${p.pid}\t${p.user}\t1u\tIPv4\t-\t${p.local} -> ${p.foreign}`)); files.forEach((f,i)=>write(`bash\t${2000+i}\troot\t3u\tREG\t-\t${f}`)); write(''); }
+function findProcessByPid(pid){ return processes.find(p=>p.pid===pid); }
+function kill9(pid){ const p=findProcessByPid(pid); if(!p){ writeColored(`kill: (${pid}) - No such process`, 'error'); return; } processes.splice(processes.indexOf(p),1); writeColored(`Killed process ${pid} (${p.name}).`,'ok'); }
+function serviceCmd(name,action){ if(!(name in services)){ writeColored(`service: Unknown service '${name}'`,'error'); return; } if(action==='stop'){ if(!services[name]){ write(`${name} already stopped.`); return; } services[name]=false; for(let i=processes.length-1;i>=0;i--){ if(processes[i].name===name){ write(`Stopping ${name} (killing pid ${processes[i].pid})`); processes.splice(i,1); } } writeColored(`${name} stopped.`,'ok'); } else if(action==='start'){ if(services[name]){ write(`${name} already running.`); return; } services[name]=true; processes.push({ pid:++nextPid, name:name, user:name==='nginx'?'www-data':'root', local:name==='nginx'?'0.0.0.0:80':'0.0.0.0:8080', foreign:'0.0.0.0:0', state:'LISTEN' }); writeColored(`${name} started (pid ${nextPid}).`,'ok'); } else { write('Usage: service <name> start|stop'); } }
+function rmCmd(path){ const idx=files.indexOf(path); if(idx===-1){ writeColored(`rm: cannot remove '${path}'`,'error'); return; } files.splice(idx,1); writeColored(`Removed '${path}'.`,'ok'); }
+
+/* -----------------------
+   Command parsing
+----------------------- */
+function simulate(input){ const raw=input.trim(); if(!raw) return; write('> '+raw); const parts=raw.split(/\s+/); const cmd=parts[0]; if(cmd==='help'){showHelp();return;} if(raw==='netstat -o'){cmd_netstat_o();return;} if(cmd==='lsof'||cmd==='losf'){cmd_lsof();return;} if(cmd==='kill'&&parts[1]==='-9'){ const pid=parseInt(parts[2],10); if(Number.isNaN(pid)){ writeColored('kill: invalid pid','error'); } else { kill9(pid); } return; } if(cmd==='service'){ const svc=parts[1]; const act=parts[2]; if(!svc||!act){ write('Usage: service <name> start|stop'); } else serviceCmd(svc,act); return; } if(cmd==='rm'){ const path=parts.slice(1).join(' '); if(!path){ write('Usage: rm <path>'); } else rmCmd(path); return; } writeColored('Command not recognized. Type "help" for commands.','error'); }
+
+/* -----------------------
+   Command history
+----------------------- */
+const history=[]; let histIndex=-1;
+runBtn.addEventListener('click',()=>{ const v=cmdInput.value; if(!v)return; history.push(v); histIndex=history.length; simulate(v); cmdInput.value=''; });
+cmdInput.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault(); runBtn.click();} else if(e.key==='ArrowUp'){ if(history.length===0) return; if(histIndex>0) histIndex--; else if(histIndex===history.length) histIndex=history.length-1; cmdInput.value=history[histIndex]||''; e.preventDefault(); } else if(e.key==='ArrowDown'){ if(history.length===0) return; if(histIndex<history.length-1) histIndex++; else histIndex=history.length; cmdInput.value=history[histIndex]||''; e.preventDefault(); }});
+
+/* -----------------------
+   Submit & Reset functionality
+----------------------- */
+submitBtn.addEventListener('click',()=>{
+  let msg='Submission result:\n';
+  if(processes.find(p=>p.name==='malproc')) msg+='Malicious process still running!\n';
+  else msg+='All malicious processes terminated.\n';
+  if(files.includes('/var/www/html/malware.php')) msg+='Suspicious file still exists!\n';
+  else msg+='Suspicious files removed.\n';
+  writeColored(msg,'hint');
+});
+
+resetBtn.addEventListener('click',()=>{
+  processes = JSON.parse(JSON.stringify(initialState.processes));
+  services = JSON.parse(JSON.stringify(initialState.services));
+  files = JSON.parse(JSON.stringify(initialState.files));
+  nextPid = 1100;
+  terminal.textContent='';
+  write('Simulation reset. Type "help" for available commands.');
+});
+
+</script>
+</body>
+</html>
